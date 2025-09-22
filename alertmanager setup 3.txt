@@ -1,0 +1,194 @@
+AlertManager Installation
+
+link : https://medium.com/devops-dudes/prometheus-alerting-with-alertmanager-e1bbba8e6a8e
+
+	wget https://github.com/prometheus/alertmanager/releases/download/v0.11.0/alertmanager-0.11.0.linux-amd64.tar.gz
+	tar -xvzf alertmanager-0.11.0.linux-amd64.tar.gz
+	mv alertmanager-0.11.0.linux-amd64/alertmanager /usr/local/bin/
+
+AlertManager Configuration
+
+    mkdir /etc/alertmanager/
+	nano /etc/alertmanager/alertmanager.yml
+	
+global:
+ resolve_timeout: 30s
+
+route:
+ receiver: 'email-notifications'
+ group_by: ['alertname']
+ group_wait: 10s
+ group_interval: 10s
+ repeat_interval: 10s
+receivers:
+- name: 'email-notifications'
+  email_configs:
+  - to: test@cdac.in   ---> put mail id here
+    from: test@cdac.in ---> put mail id here 
+    smarthost: smtp.cdac.in:587
+    auth_username: test@cdac.in
+    auth_identity: test@cdac.in
+    auth_password: ----> put password here
+    send_resolved: true
+    require_tls: yes
+    #require_ssl: yes
+inhibit_rules:
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'dev', 'instance']
+	
+Finally, we create the AlertManager systemd service :
+
+	nano /etc/systemd/system/alertmanager.service
+	
+[Unit]
+Description=AlertManager Server Service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+User=root
+Group=root
+Type=simple
+ExecStart=/usr/local/bin/alertmanager --config.file /etc/alertmanager/alertmanager.yml -web.external-url=http://x.x.x.x:9093
+
+
+[Install]
+WantedBy=multi-user.target
+
+Using -web.external-url=http://x.x.x.x:9093 allow the notification URL to be redirected to the prometheus AlertManager web interface. 
+x.x.x.x corresponds to the prometheus server public ip.
+
+Then reload the daemon and start the alertmanager service :
+
+	systemctl daemon-reload 
+	systemctl start alertmanager
+	
+AlertManager Integrated to Prometheus
+
+In the /etc/prometheus/prometheus.yml add the following
+
+# my global config
+global:
+  scrape_interval:     15s # Set the scrape interval to every 15 seconds. Default is every 1 minute.
+  evaluation_interval: 15s # Evaluate rules every 15 seconds. The default is every 1 minute.
+  # scrape_timeout is set to the global default (10s).
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+  - static_configs:
+    - targets:
+      - 10.210.0.167:9093
+
+# Load rules once and periodically evaluate them according to the global 'evaluation_interval'.
+rule_files:
+  - "alert_rules.yml"
+  # - "second_rules.yml"
+
+# A scrape configuration containing exactly one endpoint to scrape:
+# Here it's Prometheus itself.
+scrape_configs:
+  # The job name is added as a label `job=<job_name>` to any timeseries scraped from this config.
+  - job_name: 'prometheus'
+
+    # metrics_path defaults to '/metrics'
+    # scheme defaults to 'http'.
+
+    static_configs:
+    - targets: ['localhost:9090']
+
+  - job_name: 'node_exporter_centos'
+    #scrape_interval: 5s
+    static_configs:
+      - targets: ['10.210.0.167:9100','10.210.0.219:9100','10.210.12.78:9100']
+
+Prometheus server is going to track incoming time series data, once any of the rules defined in etc/prometheus/alert.rules.yml is satisfied, 
+an alert is triggered to AlertManager service that notifies the client on Slack.
+
+	nano /etc/prometheus/alert.rules.yml
+	
+groups:
+- name: alert.rules
+  rules:
+  - alert: InstanceDown
+   # Condition for alerting
+    expr: up == 0
+    for: 1m
+   # Annotation - additional informational labels to store more information
+    annotations:
+      title: 'Instance {{ $labels.instance }} down'
+      description: '{{ $labels.instance }} of job {{ $labels.job }} has been down for more than 1 minute.'
+   # Labels - additional labels to be attached to the alert
+    labels:
+        severity: 'critical'
+
+  - alert: HostOutOfMemory
+   # Condition for alerting
+    expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes * 100 < 25
+    for: 5m
+   # Annotation - additional informational labels to store more information
+    annotations:
+      title: 'Host out of memory (instance {{ $labels.instance }})'
+      description: 'Node memory is filling up (< 25% left)\n  VALUE = {{ $value }}\n  LABELS: {{ $labels }}'
+   # Labels - additional labels to be attached to the alert
+    labels:
+        severity: 'warning'
+
+  - alert: HostHighCpuLoad
+   # Condition for alerting
+    expr: (sum by (instance) (irate(node_cpu{job="node_exporter_metrics",mode="idle"}[5m]))) > 80
+    for: 5m
+   # Annotation - additional informational labels to store more information
+    annotations:
+      title: 'Host high CPU load (instance {{ $labels.instance }})'
+      description: 'CPU load is > 80%\n  VALUE = {{ $value }}\n  LABELS: {{ $labels }}'
+   # Labels - additional labels to be attached to the alert
+    labels:
+        severity: 'warning'
+
+  - alert: HostOutOfDiskSpace
+   # Condition for alerting
+    expr: 100 - (100 * node_filesystem_avail_bytes / node_filesystem_size_bytes)  > 80
+    for: 5m
+   # Annotation - additional informational labels to store more information
+    annotations:
+	   title: 'Host high CPU load (instance {{ $labels.instance }})'
+      description: 'CPU load is > 80%\n  VALUE = {{ $value }}\n  LABELS: {{ $labels }}'
+   # Labels - additional labels to be attached to the alert
+    labels:
+        severity: 'warning'
+
+  - alert: HostOutOfDiskSpace
+   # Condition for alerting
+    expr: 100 - (100 * node_filesystem_avail_bytes / node_filesystem_size_bytes)  > 80
+    for: 5m
+   # Annotation - additional informational labels to store more information
+    annotations:
+      title: 'Host out of disk space (instance {{ $labels.instance }})'
+      description: 'Disk is almost full (< 50% left)\n  VALUE = {{ $value }}\n  LABELS: {{ $labels }}'
+   # Labels - additional labels to be attached to the alert
+    labels:
+        severity: 'warning'
+		
+  - alert: HostOutOfDiskSpace
+   # Condition for alerting
+    expr: 100 - (100 * node_filesystem_avail_bytes / node_filesystem_size_bytes)  > 80
+    for: 5m
+   # Annotation - additional informational labels to store more information
+    annotations:
+      title: 'Host out of disk space (instance {{ $labels.instance }})'
+      description: 'Disk is almost full (< 50% left)\n  VALUE = {{ $value }}\n  LABELS: {{ $labels }}'
+   # Labels - additional labels to be attached to the alert
+    labels:
+        severity: 'warning'
+		
+		
+	systemctl daemon-reload
+	systemctl start alertmanager
+
+
+
+
